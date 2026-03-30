@@ -1,0 +1,13 @@
+# --- STAGE 1: Modified ---
+RUN apt-get update && apt-get install -y \
+    clang-format-11 clang-tidy-11 clang-tidy-9 patchelf && \
+    mkdir -p /opt/legacy-clang/lib
+
+RUN for tool in clang-format-11 clang-tidy-11 clang-tidy-9; do \
+    tool_path=$(which $tool); \
+    cp $tool_path /opt/legacy-clang/; \
+    # Copy ALL dependencies (no exclusions)
+    ldd $tool_path | grep "=> /" | awk '{print $3}' | xargs -I '{}' cp -n '{}' /opt/legacy-clang/lib/; \
+    # Force the binary to look in our custom lib folder first
+[2;2R[3;1R[>77;30801;0c]10;rgb:bfbf/bfbf/bfbf]11;rgb:0000/0000/0000    patchelf --set-rpath /opt/legacy-clang/lib /opt/legacy-clang/$(basename $tool); \
+    done
