@@ -1,0 +1,44 @@
+ARG TOOLS="clang-format-11 clang-tidy-11 clang-tidy-9"
+
+# --- STAGE 1: The Collector (Ubuntu 20.04) ---
+FROM ubuntu:20.04 AS collector
+ARG TOOLS
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y $TOOLS patchelf binutils && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /opt/legacy-clang/bin /opt/legacy-clang/lib
+
+RUN for tool in $TOOLS; do \
+    tool_path=$(which $tool); \
+    cp "$tool_path" /opt/legacy-clang/bin/; \
+    \
+    # 1. Get the loader
+    loader_path=$(readelf -l "$tool_path" | grep 'interpreter' | sed -e 's/.*: \(.*\)]/\1/'); \
+    cp -L "$loader_path" /opt/legacy-clang/lib/; \
+    \
+    # 2. Copy ALL dependencies (resolve symlinks with -L)
+    libs=$(ldd "$tool_path" | grep "=> /" | awk '{print $3}'); \
+    for lib in $libs; do cp -L "$lib" /opt/legacy-clang/lib/ 2>/dev/null || true; done; \
+    \
+    # 3. Patch the Binary
+    base_name=$(basename $tool_path); \
+    patchelf --set-interpreter "/opt/legacy-clang/lib/$(basename "$loader_path")" "/opt/legacy-clang/bin/$base_name"; \
+    patchelf --set-rpath /opt/legacy-clang/lib "/opt/legacy-clang/bin/$base_name"; \
+    done
+
+# 4. THE CRITICAL STEP: Patch the libraries themselves
+# This ensures that when libLLVM looks for libicuuc, it looks in /opt/legacy-clang/lib
+RUN find /opt/legacy-clang/lib -type f -name "*.so*" -exec patchelf --set-rpath /opt/legacy-clang/lib {} \;
+
+# --- STAGE 2: Final Build Image (Ubuntu 22.04) ---
+FROM ubuntu:22.04
+ARG TOOLS
+USER root
+
+RUN apt-get update && apt-get install -y clang-format-18 && rm -rf /var/lib/apt/lists/*
+COPY --from=collector /opt/legacy-clang /opt/legacy-clang
+
+RUN for tool in $TOOLS; do ln -s "/opt/legacy-clang/bin/$tool" "/usr/local/bin/$tool"; done
+
+# Final Verification
+RUN for tool in $TOOLS; do $tool --version; done
