@@ -1,0 +1,49 @@
+# --- STAGE 1: Collector (Ubuntu 20.04) ---
+FROM ubuntu:20.04 AS collector
+ARG TOOLS="clang-format-11 clang-tidy-11 clang-tidy-9"
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y $TOOLS patchelf binutils python3 && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /opt/legacy-clang/bin /opt/legacy-clang/lib
+
+# Use a more robust collection script to avoid symlink/path recursion issues
+RUN for tool in $TOOLS; do \
+    tool_path=$(which $tool); \
+    cp "$tool_path" /opt/legacy-clang/bin/; \
+    # Copy the loader (ld-linux)
+    loader=$(readelf -l "$tool_path" | grep 'interpreter' | sed -e 's/.*: \(.*\)]/\1/'); \
+    cp -L "$loader" /opt/legacy-clang/lib/; \
+    # Copy ALL dependencies (including libc)
+    ldd "$tool_path" | grep "=> /" | awk '{print $3}' | xargs -I{} cp -L {} /opt/legacy-clang/lib/; \
+    # Patch the tool to use the local loader and local libs ONLY
+    patchelf --set-interpreter "/opt/legacy-clang/lib/$(basename $loader)" "/opt/legacy-clang/bin/$(basename $tool_path)"; \
+    patchelf --set-rpath /opt/legacy-clang/lib "/opt/legacy-clang/bin/$(basename $tool_path)"; \
+    done
+
+# Ensure libraries look at each other in the same folder
+RUN find /opt/legacy-clang/lib -type f -name "*.so*" -exec patchelf --set-rpath /opt/legacy-clang/lib {} \;
+
+# --- STAGE 2: Final Build (Ubuntu 22.04) ---
+FROM ubuntu:22.04
+ARG TOOLS="clang-format-11 clang-tidy-11 clang-tidy-9"
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Clang-18 via LLVM Repo (since it's not in 22.04 default)
+RUN apt-get update && apt-get install -y wget lsb-release software-properties-common gnupg && \
+    wget https://apt.llvm.org/llvm.sh && \
+    chmod +x llvm.sh && \
+    ./llvm.sh 18 && \
+    apt-get install -y clang-format-18 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy isolated legacy bundle
+COPY --from=collector /opt/legacy-clang /opt/legacy-clang
+
+# Symlink legacy tools to path
+RUN for tool in $TOOLS; do \
+    ln -s "/opt/legacy-clang/bin/$tool" "/usr/local/bin/$tool"; \
+    done
+
+# Verification
+RUN clang-format-18 --version && \
+    for tool in $TOOLS; do $tool --version || (echo "$tool failed" && exit 1); done
