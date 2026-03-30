@@ -1,0 +1,60 @@
+# 1. Global argument: Define tools once for all stages
+ARG TOOLS="clang-format-11 clang-tidy-11 clang-tidy-9"
+
+# --- STAGE 1: The Collector (Ubuntu 20.04) ---
+FROM ubuntu:20.04 AS collector
+ARG TOOLS
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install requirements: patchelf to fix RPATH, binutils for readelf
+RUN apt-get update && apt-get install -y $TOOLS patchelf binutils && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /opt/legacy-clang/bin /opt/legacy-clang/lib
+
+RUN for tool in $TOOLS; do \
+    tool_path=$(which $tool); \
+    base_name=$(basename "$tool_path"); \
+    cp "$tool_path" /opt/legacy-clang/bin/; \
+    \
+    # A. Dynamically find the loader (e.g., ld-linux-x86-64.so.2)
+    loader_path=$(readelf -l "$tool_path" | grep 'interpreter' | sed -e 's/.*: \(.*\)]/\1/'); \
+    # -L ensures we copy the ACTUAL loader file, not a symlink
+    cp -L "$loader_path" /opt/legacy-clang/lib/; \
+    \
+    # B. Copy all dependencies (Recursive and Symlink-resolved)
+    # -L is critical for libicuuc.so.66 -> libicuuc.so.66.1
+    libs=$(ldd "$tool_path" | grep "=> /" | awk '{print $3}'); \
+    for lib in $libs; do \
+        cp -nL "$lib" /opt/legacy-clang/lib/ 2>/dev/null || true; \
+    done; \
+    \
+    # C. Patch the Binary: Point to our local loader and lib folder
+    patchelf --set-interpreter "/opt/legacy-clang/lib/$(basename "$loader_path")" "/opt/legacy-clang/bin/$base_name"; \
+    patchelf --set-rpath /opt/legacy-clang/lib "/opt/legacy-clang/bin/$base_name"; \
+    done
+
+# D. DEEP PATCH: Make libraries find each other (Fixes nested libicuuc errors)
+RUN find /opt/legacy-clang/lib -type f -name "*.so*" -exec patchelf --set-rpath /opt/legacy-clang/lib {} \;
+
+# --- STAGE 2: Final Build Image (Ubuntu 22.04) ---
+FROM ubuntu:22.04
+ARG TOOLS
+USER root
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 1. Install modern Clang-18 natively
+RUN apt-get update && apt-get install -y clang-format-18 && rm -rf /var/lib/apt/lists/*
+
+# 2. Copy the fully isolated legacy bundle
+COPY --from=collector /opt/legacy-clang /opt/legacy-clang
+
+# 3. Create system-wide symlinks
+RUN for tool in $TOOLS; do \
+    ln -s "/opt/legacy-clang/bin/$tool" "/usr/local/bin/$tool"; \
+    done
+
+# 4. FINAL VERIFICATION: Build fails if a library is missing
+RUN echo "Verifying installations..." && \
+    clang-format-18 --version && \
+    for tool in $TOOLS; do \
+        echo "Testing $tool..." && "$tool" --version || exit 1; \
+    done
