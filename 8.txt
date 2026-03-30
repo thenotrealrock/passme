@@ -1,0 +1,39 @@
+# --- Stage 1: The Builder ---
+FROM ubuntu:20.04 AS builder
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    clang-format-11 \
+    clang-tidy-9 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/llvm-tools/bin /opt/llvm-tools/lib
+
+# Copy the binaries
+RUN cp /usr/bin/clang-format-11 /opt/llvm-tools/bin/ && \
+    cp /usr/bin/clang-tidy-9 /opt/llvm-tools/bin/
+
+# SURGICAL COPY: 
+# We copy dependencies BUT EXCLUDE core system libraries (libc, libpthread, ld-linux, etc.)
+# because Ubuntu 22.04 already has newer, backward-compatible versions of these.
+RUN ldd /usr/bin/clang-format-11 | grep "=> /" | awk '{print $3}' | \
+    grep -vE "libc.so|libpthread.so|librt.so|libdl.so|libm.so|ld-linux" | \
+    xargs -I '{}' cp -v '{}' /opt/llvm-tools/lib/ || true
+
+RUN ldd /usr/bin/clang-tidy-9 | grep "=> /" | awk '{print $3}' | \
+    grep -vE "libc.so|libpthread.so|librt.so|libdl.so|libm.so|ld-linux" | \
+    xargs -I '{}' cp -v '{}' /opt/llvm-tools/lib/ || true
+
+# --- Stage 2: Final Image ---
+FROM ubuntu:22.04 AS final
+
+COPY --from=builder /opt/llvm-tools /opt/llvm-tools
+
+# Add to PATH
+ENV PATH="/opt/llvm-tools/bin:${PATH}"
+
+# Add to LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH="/opt/llvm-tools/lib:${LD_LIBRARY_PATH}"
+
+# Verification
+RUN clang-format-11 --version && clang-tidy-9 -version
