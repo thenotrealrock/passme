@@ -1,0 +1,39 @@
+# --- Stage 1: The Builder ---
+FROM ubuntu:20.04 AS builder
+
+# Prevent interactive prompts during apt-get
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    clang-format-11 \
+    clang-tidy-9 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a directory to bundle the binaries and their specific libs
+RUN mkdir -p /opt/llvm-tools/bin /opt/llvm-tools/lib
+
+# Copy the binaries
+RUN cp /usr/bin/clang-format-11 /opt/llvm-tools/bin/ && \
+    cp /usr/bin/clang-tidy-9 /opt/llvm-tools/bin/
+
+# Use ldd to find all shared library dependencies and copy them to our lib folder
+# This avoids overwriting the system libs in the final 22.04 image
+RUN ldd /usr/bin/clang-format-11 | grep "=> /" | awk '{print $3}' | xargs -I '{}' cp -v '{}' /opt/llvm-tools/lib/ && \
+    ldd /usr/bin/clang-tidy-9 | grep "=> /" | awk '{print $3}' | xargs -I '{}' cp -v '{}' /opt/llvm-tools/lib/
+
+# --- Stage 2: Final Image ---
+# Replacing 'my-custom-22.04-base' with your actual base image name
+FROM ubuntu:22.04 AS final
+
+# Copy the bundled tools from the builder
+COPY --from=builder /opt/llvm-tools /opt/llvm-tools
+
+# Update PATH so you can call them directly
+ENV PATH="/opt/llvm-tools/bin:${PATH}"
+
+# IMPORTANT: Tell the linker to look in our custom lib folder first 
+# This ensures the 20.04-specific libs are found by the 20.04 binaries
+ENV LD_LIBRARY_PATH="/opt/llvm-tools/lib:${LD_LIBRARY_PATH}"
+
+# Verification
+RUN clang-format-11 --version && clang-tidy-9 -version
